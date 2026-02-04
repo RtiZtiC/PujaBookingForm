@@ -1,170 +1,162 @@
-// Vercel Serverless Function for Shopify Draft Orders
-// File location: api/create-draft-order.js
-// CORRECTED VERSION - Ready for Production
+import crypto from "crypto";
 
-module.exports = async function handler(req, res) {
-  // Enable CORS
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  
-  // Handle preflight requests
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  
-  // Only allow POST requests
-  if (req.method !== 'POST') {
-    return res.status(405).json({ 
-      error: 'Method not allowed',
-      message: 'This endpoint only accepts POST requests'
-    });
-  }
+const SHOPIFY_GRAPHQL = `https://${process.env.SHOPIFY_SHOP}/admin/api/2024-01/graphql.json`;
 
-  // Get environment variables
-  const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
-  const SHOPIFY_ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
-  const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-01';
-
-  // Validate environment variables
-  if (!SHOPIFY_STORE_URL || !SHOPIFY_ADMIN_API_TOKEN) {
-    console.error('Missing environment variables');
-    return res.status(500).json({
-      success: false,
-      error: 'Server configuration error: Missing Shopify credentials',
-      hint: 'Set SHOPIFY_STORE_URL and SHOPIFY_ADMIN_API_TOKEN in Vercel environment variables'
-    });
-  }
-  
+export default async function handler(req, res) {
   try {
-    const { mutation, variables, paymentId, totalAmount } = req.body;
-    
-    // Validate request body
-    if (!mutation || !variables) {
-      return res.status(400).json({
-        success: false,
-        error: 'Missing required fields: mutation and variables',
-        received: { 
-          hasMutation: !!mutation, 
-          hasVariables: !!variables,
-          hasPaymentId: !!paymentId,
-          hasTotalAmount: !!totalAmount
+    if (req.method !== "POST") {
+      return res.status(405).json({ error: "Method not allowed" });
+    }
+
+    const {
+      razorpay_payment_id,
+      razorpay_order_id,
+      razorpay_signature,
+      variantId,
+      addons,
+      dakshina,
+      prasad,
+      customer,
+      formTotal
+    } = req.body;
+
+    // --------------------------------------------------
+    // 1️⃣ VERIFY RAZORPAY SIGNATURE
+    // --------------------------------------------------
+    const body = razorpay_order_id + "|" + razorpay_payment_id;
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(body)
+      .digest("hex");
+
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({ error: "Payment verification failed" });
+    }
+
+    // --------------------------------------------------
+    // 2️⃣ FETCH VARIANT PRICE FROM SHOPIFY
+    // --------------------------------------------------
+    const variantQuery = `
+      query getVariant($id: ID!) {
+        productVariant(id: $id) {
+          price
+          title
         }
-      });
-    }
-    
-    console.log('Creating draft order for payment:', paymentId);
-    console.log('Total amount:', totalAmount);
-    
-    // Make GraphQL request to Shopify with timeout
-    const shopifyUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
-    
-    // Add timeout to prevent hanging requests
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 25000); // 25 seconds
-    
-    let shopifyResponse;
-    try {
-      shopifyResponse = await fetch(shopifyUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_TOKEN
-        },
-        body: JSON.stringify({
-          query: mutation,
-          variables: variables
-        }),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-    } catch (fetchError) {
-      clearTimeout(timeout);
-      if (fetchError.name === 'AbortError') {
-        console.error('Request timeout');
-        return res.status(504).json({
-          success: false,
-          error: 'Request timeout - Shopify API did not respond in time'
-        });
       }
-      throw fetchError;
-    }
-    
-    // Check if request was successful
-    if (!shopifyResponse.ok) {
-      const errorText = await shopifyResponse.text();
-      console.error('Shopify API error:', shopifyResponse.status, errorText);
-      return res.status(shopifyResponse.status).json({
-        success: false,
-        error: 'Shopify API request failed',
-        statusCode: shopifyResponse.status,
-        details: errorText
-      });
-    }
-    
-    const data = await shopifyResponse.json();
-    
-    // Conditional logging based on environment
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('Shopify response:', JSON.stringify(data, null, 2));
-    } else {
-      console.log('Draft order processing complete');
-    }
-    
-    // Check for GraphQL errors
-    if (data.errors) {
-      console.error('GraphQL errors:', data.errors);
+    `;
+
+    const variantResp = await shopifyFetch(variantQuery, {
+      id: `gid://shopify/ProductVariant/${variantId}`
+    });
+
+    const variantPrice = parseFloat(
+      variantResp.data.productVariant.price
+    );
+
+    // --------------------------------------------------
+    // 3️⃣ RE-CALCULATE TOTAL (SERVER-SIDE)
+    // --------------------------------------------------
+    let calculatedTotal = variantPrice;
+
+    addons.forEach(a => calculatedTotal += a.price);
+    calculatedTotal += dakshina;
+    if (prasad) calculatedTotal += 30;
+
+    if (calculatedTotal !== formTotal) {
       return res.status(400).json({
-        success: false,
-        errors: data.errors,
-        hint: 'Check Shopify API permissions and GraphQL query syntax'
+        error: "Amount mismatch detected",
+        calculatedTotal,
+        formTotal
       });
     }
-    
-    // Extract draft order from response
-    const draftOrder = data.data?.draftOrderCreate?.draftOrder;
-    const userErrors = data.data?.draftOrderCreate?.userErrors;
-    
-    // Check for user errors
-    if (userErrors && userErrors.length > 0) {
-      console.error('User errors:', userErrors);
-      return res.status(400).json({
-        success: false,
-        errors: userErrors,
-        hint: 'Check variant IDs, customer data, and line item details'
-      });
-    }
-    
-    // Verify draft order was created
-    if (!draftOrder) {
-      console.error('No draft order in response');
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to create draft order',
-        details: data
-      });
-    }
-    
-    console.log('✅ Draft order created successfully:', draftOrder.name);
-    
-    // Return success response
+
+    // --------------------------------------------------
+    // 4️⃣ CREATE DRAFT ORDER
+    // --------------------------------------------------
+    const draftMutation = `
+      mutation draftOrderCreate($input: DraftOrderInput!) {
+        draftOrderCreate(input: $input) {
+          draftOrder {
+            id
+            name
+          }
+          userErrors {
+            message
+          }
+        }
+      }
+    `;
+
+    const draftInput = {
+      lineItems: [
+        {
+          variantId: `gid://shopify/ProductVariant/${variantId}`,
+          quantity: 1
+        }
+      ],
+      email: customer.email,
+      phone: "+91" + customer.phone,
+      note: `PAID VIA RAZORPAY\nPayment ID: ${razorpay_payment_id}`,
+      tags: [
+        "puja-booking",
+        "razorpay-paid",
+        `payment-${razorpay_payment_id}`
+      ],
+      customAttributes: [
+        { key: "Name", value: customer.name },
+        { key: "Phone", value: customer.phone },
+        { key: "Gotra", value: customer.gotra },
+        { key: "Wish", value: customer.wish }
+      ],
+      paymentPending: false
+    };
+
+    const draftResp = await shopifyFetch(draftMutation, { input: draftInput });
+
+    const draftOrderId =
+      draftResp.data.draftOrderCreate.draftOrder.id;
+
+    // --------------------------------------------------
+    // 5️⃣ COMPLETE DRAFT ORDER (REAL ORDER)
+    // --------------------------------------------------
+    const completeMutation = `
+      mutation draftOrderComplete($id: ID!) {
+        draftOrderComplete(id: $id) {
+          order {
+            id
+            name
+          }
+        }
+      }
+    `;
+
+    const completeResp = await shopifyFetch(completeMutation, {
+      id: draftOrderId
+    });
+
     return res.status(200).json({
       success: true,
-      data: data.data,
-      draftOrderId: draftOrder.id,
-      draftOrderName: draftOrder.name,
-      invoiceUrl: draftOrder.invoiceUrl || null,
-      paymentId: paymentId,
-      totalAmount: totalAmount
+      orderName: completeResp.data.draftOrderComplete.order.name
     });
-    
-  } catch (error) {
-    console.error('Server error:', error);
-    return res.status(500).json({
-      success: false,
-      error: error.message,
-      type: error.name,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Internal error" });
   }
-};
+}
+
+// --------------------------------------------------
+// SHOPIFY FETCH HELPER
+// --------------------------------------------------
+async function shopifyFetch(query, variables) {
+  const res = await fetch(SHOPIFY_GRAPHQL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN
+    },
+    body: JSON.stringify({ query, variables })
+  });
+
+  return res.json();
+}
