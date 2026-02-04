@@ -4,9 +4,23 @@ const SHOPIFY_GRAPHQL = `https://${process.env.SHOPIFY_SHOP}/admin/api/2024-01/g
 
 export default async function handler(req, res) {
   try {
+    // -------------------------------
+    // ✅ CORS HEADERS (MUST BE FIRST)
+    // -------------------------------
+    res.setHeader("Access-Control-Allow-Origin", "https://digitalpuja.in");
+    res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    // ✅ Handle preflight request
+    if (req.method === "OPTIONS") {
+      return res.status(200).end();
+    }
+
+    // ❌ Block everything except POST
     if (req.method !== "POST") {
       return res.status(405).json({ error: "Method not allowed" });
     }
+
 
     const {
       razorpay_payment_id,
