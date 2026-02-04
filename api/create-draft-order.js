@@ -1,7 +1,8 @@
 // Vercel Serverless Function for Shopify Draft Orders
 // File location: api/create-draft-order.js
+// CORRECTED VERSION - Ready for Production
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   // Enable CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -23,7 +24,7 @@ export default async function handler(req, res) {
   // Get environment variables
   const SHOPIFY_STORE_URL = process.env.SHOPIFY_STORE_URL;
   const SHOPIFY_ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_API_TOKEN;
-  const SHOPIFY_API_VERSION = '2024-01';
+  const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || '2024-01';
 
   // Validate environment variables
   if (!SHOPIFY_STORE_URL || !SHOPIFY_ADMIN_API_TOKEN) {
@@ -55,20 +56,39 @@ export default async function handler(req, res) {
     console.log('Creating draft order for payment:', paymentId);
     console.log('Total amount:', totalAmount);
     
-    // Make GraphQL request to Shopify
+    // Make GraphQL request to Shopify with timeout
     const shopifyUrl = `https://${SHOPIFY_STORE_URL}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
     
-    const shopifyResponse = await fetch(shopifyUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_TOKEN
-      },
-      body: JSON.stringify({
-        query: mutation,
-        variables: variables
-      })
-    });
+    // Add timeout to prevent hanging requests
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 25000); // 25 seconds
+    
+    let shopifyResponse;
+    try {
+      shopifyResponse = await fetch(shopifyUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': SHOPIFY_ADMIN_API_TOKEN
+        },
+        body: JSON.stringify({
+          query: mutation,
+          variables: variables
+        }),
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+    } catch (fetchError) {
+      clearTimeout(timeout);
+      if (fetchError.name === 'AbortError') {
+        console.error('Request timeout');
+        return res.status(504).json({
+          success: false,
+          error: 'Request timeout - Shopify API did not respond in time'
+        });
+      }
+      throw fetchError;
+    }
     
     // Check if request was successful
     if (!shopifyResponse.ok) {
@@ -84,14 +104,20 @@ export default async function handler(req, res) {
     
     const data = await shopifyResponse.json();
     
-    console.log('Shopify response:', JSON.stringify(data, null, 2));
+    // Conditional logging based on environment
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('Shopify response:', JSON.stringify(data, null, 2));
+    } else {
+      console.log('Draft order processing complete');
+    }
     
     // Check for GraphQL errors
     if (data.errors) {
       console.error('GraphQL errors:', data.errors);
       return res.status(400).json({
         success: false,
-        errors: data.errors
+        errors: data.errors,
+        hint: 'Check Shopify API permissions and GraphQL query syntax'
       });
     }
     
@@ -104,7 +130,8 @@ export default async function handler(req, res) {
       console.error('User errors:', userErrors);
       return res.status(400).json({
         success: false,
-        errors: userErrors
+        errors: userErrors,
+        hint: 'Check variant IDs, customer data, and line item details'
       });
     }
     
@@ -140,4 +167,4 @@ export default async function handler(req, res) {
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
-}
+};
