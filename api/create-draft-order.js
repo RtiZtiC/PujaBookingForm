@@ -1,5 +1,5 @@
 import crypto from "crypto";
-
+import fetch from "node-fetch";
 const SHOPIFY_GRAPHQL = `https://${process.env.SHOPIFY_SHOP}/admin/api/2024-01/graphql.json`;
 
 export default async function handler(req, res) {
