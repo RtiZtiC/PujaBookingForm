@@ -2,6 +2,7 @@
   "name": "puja-booking-backend",
   "version": "1.0.0",
   "description": "Backend for Shopify GraphQL order creation",
+  "type": "module",
   "main": "api/create-draft-order.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
